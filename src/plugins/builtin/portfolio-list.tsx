@@ -1,0 +1,184 @@
+import { useState, useCallback, useRef, useEffect } from "react";
+import { useKeyboard } from "@opentui/react";
+import { TextAttributes } from "@opentui/core";
+import type { TabSelectRenderable } from "@opentui/core";
+import type { GloomPlugin, PaneProps } from "../../types/plugin";
+import { useAppState } from "../../state/app-context";
+import { getActiveTabTickers, getLeftTabs } from "../../state/selectors";
+import { colors, priceColor } from "../../theme/colors";
+import { formatCurrency, formatPercentRaw, formatCompact, formatNumber, padTo } from "../../utils/format";
+import type { ColumnConfig } from "../../types/config";
+import type { TickerFile } from "../../types/ticker";
+import type { TickerFinancials } from "../../types/financials";
+
+function getColumnValue(
+  col: ColumnConfig,
+  ticker: TickerFile,
+  financials: TickerFinancials | undefined,
+): { text: string; color?: string } {
+  const q = financials?.quote;
+  const f = financials?.fundamentals;
+  switch (col.id) {
+    case "ticker":
+      return { text: ticker.frontmatter.ticker };
+    case "name":
+      return { text: ticker.frontmatter.name || q?.name || "" };
+    case "price":
+      return {
+        text: q ? formatCurrency(q.price, q.currency) : "—",
+        color: q ? priceColor(q.change) : undefined,
+      };
+    case "change":
+      return {
+        text: q ? (q.change >= 0 ? "+" : "") + q.change.toFixed(2) : "—",
+        color: q ? priceColor(q.change) : undefined,
+      };
+    case "change_pct":
+      return {
+        text: q ? formatPercentRaw(q.changePercent) : "—",
+        color: q ? priceColor(q.changePercent) : undefined,
+      };
+    case "market_cap":
+      return { text: q?.marketCap ? formatCompact(q.marketCap) : "—" };
+    case "pe":
+      return { text: f?.trailingPE ? formatNumber(f.trailingPE, 1) : "—" };
+    case "dividend_yield":
+      return {
+        text: f?.dividendYield != null ? (f.dividendYield * 100).toFixed(2) + "%" : "—",
+      };
+    default:
+      return { text: "—" };
+  }
+}
+
+function PortfolioListPane({ focused, width, height }: PaneProps) {
+  const { state, dispatch } = useAppState();
+  const tabs = getLeftTabs(state);
+  const tickers = getActiveTabTickers(state);
+  const [selectedIdx, setSelectedIdx] = useState(0);
+
+  const tabOptions = tabs.map((t) => ({ name: t.name, description: "", value: t.id }));
+  const currentTabIdx = tabs.findIndex((t) => t.id === state.activeLeftTab);
+  const tabRef = useRef<TabSelectRenderable>(null);
+
+  useEffect(() => {
+    if (tabRef.current && currentTabIdx >= 0) {
+      tabRef.current.setSelectedIndex(currentTabIdx);
+    }
+  }, [currentTabIdx]);
+
+  useKeyboard((event) => {
+    if (!focused) return;
+    const key = event.name;
+
+    if (key === "j" || key === "down") {
+      const next = Math.min(selectedIdx + 1, tickers.length - 1);
+      setSelectedIdx(next);
+      if (tickers[next]) dispatch({ type: "SELECT_TICKER", symbol: tickers[next]!.frontmatter.ticker });
+    } else if (key === "k" || key === "up") {
+      const next = Math.max(selectedIdx - 1, 0);
+      setSelectedIdx(next);
+      if (tickers[next]) dispatch({ type: "SELECT_TICKER", symbol: tickers[next]!.frontmatter.ticker });
+    } else if (key === "h" || key === "left") {
+      const newIdx = Math.max(currentTabIdx - 1, 0);
+      if (tabs[newIdx]) dispatch({ type: "SET_LEFT_TAB", tab: tabs[newIdx]!.id });
+    } else if (key === "l" || key === "right") {
+      const newIdx = Math.min(currentTabIdx + 1, tabs.length - 1);
+      if (tabs[newIdx]) dispatch({ type: "SET_LEFT_TAB", tab: tabs[newIdx]!.id });
+    } else if (key === "enter") {
+      dispatch({ type: "SET_ACTIVE_PANEL", panel: "right" });
+    }
+  });
+
+  // Auto-select first ticker when list changes
+  if (tickers.length > 0 && selectedIdx >= tickers.length) {
+    setSelectedIdx(0);
+  }
+
+  const innerWidth = Math.max(width - 2, 20);
+  const cols = state.config.columns;
+
+  return (
+    <box flexDirection="column" flexGrow={1}>
+      {/* Tab bar */}
+      <tab-select
+        ref={tabRef}
+        options={tabOptions}
+        focused={false}
+        showUnderline
+        textColor={colors.textDim}
+        selectedTextColor={colors.text}
+        backgroundColor={colors.bg}
+        selectedBackgroundColor={colors.bg}
+        onChange={(idx) => {
+          if (tabs[idx]) dispatch({ type: "SET_LEFT_TAB", tab: tabs[idx]!.id });
+        }}
+      />
+
+      {/* Column headers */}
+      <box flexDirection="row" height={1} paddingX={1}>
+        {cols.map((col) => (
+          <box key={col.id} width={col.width + 1}>
+            <text attributes={TextAttributes.BOLD} fg={colors.textDim}>
+              {padTo(col.label, col.width, col.align)}
+            </text>
+          </box>
+        ))}
+      </box>
+
+      {/* Ticker rows */}
+      <scrollbox flexGrow={1} scrollY>
+        {tickers.length === 0 ? (
+          <box paddingX={1} paddingY={1}>
+            <text fg={colors.textDim}>No tickers. Press Cmd+K to add one.</text>
+          </box>
+        ) : (
+          tickers.map((ticker, idx) => {
+            const isSelected = idx === selectedIdx;
+            const fin = state.financials.get(ticker.frontmatter.ticker);
+
+            return (
+              <box
+                key={ticker.frontmatter.ticker}
+                flexDirection="row"
+                height={1}
+                paddingX={1}
+                backgroundColor={isSelected ? colors.selected : colors.bg}
+              >
+                {cols.map((col) => {
+                  const { text, color } = getColumnValue(col, ticker, fin);
+                  return (
+                    <box key={col.id} width={col.width + 1}>
+                      <text
+                        fg={color || (isSelected ? colors.selectedText : colors.text)}
+                      >
+                        {padTo(text, col.width, col.align)}
+                      </text>
+                    </box>
+                  );
+                })}
+              </box>
+            );
+          })
+        )}
+      </scrollbox>
+    </box>
+  );
+}
+
+export const portfolioListPlugin: GloomPlugin = {
+  id: "portfolio-list",
+  name: "Portfolio List",
+  version: "1.0.0",
+
+  panes: [
+    {
+      id: "portfolio-list",
+      name: "Portfolio",
+      icon: "P",
+      component: PortfolioListPane,
+      defaultPosition: "left",
+      defaultWidth: "40%",
+    },
+  ],
+};

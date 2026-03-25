@@ -1,0 +1,115 @@
+import { createReactSlotRegistry, createSlot } from "@opentui/react";
+import type { CliRenderer } from "@opentui/core";
+import type { ReactNode } from "react";
+import type { GloomSlots, GloomPlugin, GloomPluginContext, PaneDef, CommandDef, CustomColumnDef } from "../types/plugin";
+import type { BrokerAdapter } from "../types/broker";
+import type { TickerFile } from "../types/ticker";
+import type { TickerFinancials } from "../types/financials";
+
+export class PluginRegistry {
+  private slotRegistry;
+  private plugins = new Map<string, GloomPlugin>();
+  private unregisterFns = new Map<string, () => void>();
+  private _panes = new Map<string, PaneDef>();
+  private _commands = new Map<string, CommandDef>();
+  private _columns = new Map<string, CustomColumnDef>();
+  private _brokers = new Map<string, BrokerAdapter>();
+
+  // External data accessors (set by app)
+  getTickerFn: ((symbol: string) => TickerFile | null) = () => null;
+  getDataFn: ((symbol: string) => TickerFinancials | null) = () => null;
+
+  readonly Slot;
+
+  constructor(renderer: CliRenderer) {
+    // Cast needed because GloomSlots is a concrete interface, not a generic Record
+    this.slotRegistry = createReactSlotRegistry<GloomSlots & Record<string, object>>(renderer, {});
+    this.Slot = createSlot(this.slotRegistry) as any;
+  }
+
+  get panes(): ReadonlyMap<string, PaneDef> {
+    return this._panes;
+  }
+
+  get commands(): ReadonlyMap<string, CommandDef> {
+    return this._commands;
+  }
+
+  get columns(): ReadonlyMap<string, CustomColumnDef> {
+    return this._columns;
+  }
+
+  get brokers(): ReadonlyMap<string, BrokerAdapter> {
+    return this._brokers;
+  }
+
+  private createContext(): GloomPluginContext {
+    return {
+      registerPane: (pane) => this._panes.set(pane.id, pane),
+      registerCommand: (cmd) => this._commands.set(cmd.id, cmd),
+      registerColumn: (col) => this._columns.set(col.id, col),
+      registerBroker: (broker) => this._brokers.set(broker.id, broker),
+      getData: (ticker) => this.getDataFn(ticker),
+      getTicker: (ticker) => this.getTickerFn(ticker),
+    };
+  }
+
+  async register(plugin: GloomPlugin): Promise<void> {
+    // Register panes
+    if (plugin.panes) {
+      for (const pane of plugin.panes) {
+        this._panes.set(pane.id, pane);
+      }
+    }
+
+    // Register broker
+    if (plugin.broker) {
+      this._brokers.set(plugin.broker.id, plugin.broker);
+    }
+
+    // Register slot renderers with OpenTUI's registry
+    if (plugin.slots) {
+      const corePlugin = {
+        id: plugin.id,
+        order: plugin.order,
+        slots: {} as Record<string, any>,
+      };
+      for (const [slotName, renderer] of Object.entries(plugin.slots)) {
+        if (renderer) {
+          corePlugin.slots[slotName] = (_ctx: any, props: any) => (renderer as any)(props);
+        }
+      }
+      const unregister = this.slotRegistry.register(corePlugin as any);
+      this.unregisterFns.set(plugin.id, unregister);
+    }
+
+    // Call setup
+    if (plugin.setup) {
+      await plugin.setup(this.createContext());
+    }
+
+    this.plugins.set(plugin.id, plugin);
+  }
+
+  unregister(pluginId: string): void {
+    const plugin = this.plugins.get(pluginId);
+    if (!plugin) return;
+
+    plugin.dispose?.();
+    this.unregisterFns.get(pluginId)?.();
+    this.unregisterFns.delete(pluginId);
+
+    // Clean up panes
+    if (plugin.panes) {
+      for (const pane of plugin.panes) {
+        this._panes.delete(pane.id);
+      }
+    }
+
+    if (plugin.broker) {
+      this._brokers.delete(plugin.broker.id);
+    }
+
+    this.plugins.delete(pluginId);
+  }
+}
